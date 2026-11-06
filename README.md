@@ -30,20 +30,51 @@ FROM Invoice
 GROUP BY sales_year
 ORDER BY sales_year;
  
- 
--- Q3. Top 10 countries by revenue
--- Question: Which markets bring in the most money?
--- Techniques: INNER JOIN, AGGREGATE, GROUP BY, ORDER BY + LIMIT (top N)
+------------------------------------------------------------
+-- Q3. TOP 3 PRODUCTS IN EACH CATEGORY USING ROW_NUMBER + PARTITION BY
+------------------------------------------------------------
+-- Business question:
+-- What are the three highest-revenue tracks in each genre?
+--
+-- Approach:
+-- The first CTE calculates revenue for each track within its genre.
+-- The second CTE numbers tracks separately inside each genre, highest revenue first.
+-- ROW_NUMBER() is used instead of RANK() because many Chinook tracks sold only once
+-- and would tie; track_name is the tiebreaker so each genre returns at most 3 rows.
+
+WITH track_genre_revenue AS (
+    SELECT
+        Genre.GenreId,
+        Genre.Name AS genre,
+        Track.TrackId,
+        Track.Name AS track_name,
+        SUM(InvoiceLine.UnitPrice * InvoiceLine.Quantity) AS track_revenue
+    FROM Genre
+    INNER JOIN Track
+        ON Genre.GenreId = Track.GenreId
+    INNER JOIN InvoiceLine
+        ON Track.TrackId = InvoiceLine.TrackId
+    GROUP BY Genre.GenreId, Genre.Name, Track.TrackId, Track.Name
+),
+ranked_tracks AS (
+    SELECT
+        genre,
+        track_name,
+        track_revenue,
+        ROW_NUMBER() OVER (
+            PARTITION BY GenreId
+            ORDER BY track_revenue DESC, track_name
+        ) AS category_rank
+    FROM track_genre_revenue
+)
 SELECT
-    c.Country,
-    COUNT(DISTINCT c.CustomerId) AS customers,
-    ROUND(SUM(i.Total), 2)       AS revenue
-FROM Customer c
-INNER JOIN Invoice i
-    ON i.CustomerId = c.CustomerId
-GROUP BY c.Country
-ORDER BY revenue DESC
-LIMIT 10;
+    genre,
+    track_name,
+    track_revenue,
+    category_rank
+FROM ranked_tracks
+WHERE category_rank <= 3
+ORDER BY genre, category_rank;
  
  
 -- Q4. Top 10 customers by lifetime spend
@@ -79,19 +110,52 @@ HAVING COUNT(i.InvoiceId) >= 7
 ORDER BY purchases DESC, total_spent DESC;
  
  
--- Q6. Genre performance
--- Question: Which genres earn the most?
--- Techniques: INNER JOIN (3 tables), GROUP BY + HAVING, AGGREGATE
+
+-- 6. CASE WHEN TO CREATE CUSTOMER VALUE SEGMENTS
+
+-- Business question:
+-- How can customers be grouped into High, Medium, and Low value segments by lifetime spend?
+--
+-- Approach:
+-- The first CTE calculates each customer's total invoice spend, retaining customers
+-- with no invoices.
+-- The second CTE uses NTILE(3) to split customers into three equal-sized groups by spend,
+-- so the segments adapt to the data instead of relying on fixed dollar thresholds
+-- (Chinook customers all spend similar amounts, so a fixed cutoff like 100 matches no one).
+-- CASE then labels the groups: top third = High, middle third = Medium, bottom third = Low.
+
+WITH customer_spend AS (
+    SELECT
+        Customer.CustomerId,
+        Customer.FirstName,
+        Customer.LastName,
+        COALESCE(SUM(Invoice.Total), 0) AS lifetime_spend
+    FROM Customer
+    LEFT JOIN Invoice
+        ON Customer.CustomerId = Invoice.CustomerId
+    GROUP BY Customer.CustomerId, Customer.FirstName, Customer.LastName
+),
+spend_tiers AS (
+    SELECT
+        CustomerId,
+        FirstName,
+        LastName,
+        lifetime_spend,
+        NTILE(3) OVER (ORDER BY lifetime_spend DESC) AS spend_tier
+    FROM customer_spend
+)
 SELECT
-    g.Name                                     AS genre,
-    SUM(il.Quantity)                           AS units_sold,
-    ROUND(SUM(il.UnitPrice * il.Quantity), 2)  AS revenue
-FROM InvoiceLine il
-INNER JOIN Track t ON t.TrackId = il.TrackId
-INNER JOIN Genre g ON g.GenreId = t.GenreId
-GROUP BY g.GenreId, g.Name
-HAVING SUM(il.Quantity) > 50
-ORDER BY revenue DESC;
+    CustomerId,
+    FirstName,
+    LastName,
+    lifetime_spend,
+    CASE
+        WHEN spend_tier = 1 THEN 'High'
+        WHEN spend_tier = 2 THEN 'Medium'
+        ELSE 'Low'
+    END AS customer_segment
+FROM spend_tiers
+ORDER BY lifetime_spend DESC, CustomerId;
  
  
 -- Q7. Top 10 artists by revenue

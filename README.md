@@ -1,313 +1,188 @@
--- Week 5: Intermediate SQL Challenges
--- Database: Chinook (SQLite)
--- File: week5_challenges.sql
 
-Notes:
--- * Track is treated as the product table; Genre is the product category.
--- * Track sales are measured as InvoiceLine.UnitPrice * InvoiceLine.Quantity.
--- * Customer value thresholds in Query 6 are illustrative; adjust them to the business.
+-- Chinook Sales Analysis: SQL Queries (SQLite syntax)
 
-------------------------------------------------------------
--- 1. SUBQUERY IN THE WHERE CLAUSE
-------------------------------------------------------------
--- Business question:
--- Which tracks have a unit price higher than the average unit price of all tracks?
---
--- Approach:
--- The subquery calculates the average track price first.
--- The outer query returns only tracks priced above that average.
+-- Source: https://github.com/lerocha/chinook-database
 
+-- Each query lists the business question and the techniques it uses.
+-- =====================================================================
+ 
+ 
+-- Q1. Overall sales baseline
+-- Question: How much revenue did the store make, across how many invoices?
+-- Techniques: AGGREGATE (SUM, COUNT, AVG, MIN, MAX)
 SELECT
-    TrackId,
-    Name AS track_name,
-    UnitPrice
-FROM Track
-WHERE UnitPrice > (
-    SELECT AVG(UnitPrice)
-    FROM Track
-)
-ORDER BY UnitPrice DESC, track_name;
-
-
-------------------------------------------------------------
--- 2. TWO CHAINED CTEs
-------------------------------------------------------------
--- Business question:
--- Which artists generate the highest revenue, and what is each artist's revenue rank?
---
--- Approach:
--- The first CTE calculates revenue by artist from invoice line items.
--- The second CTE ranks those totals; the final query returns the top 10 artists.
-
-WITH artist_revenue AS (
-    SELECT
-        Artist.ArtistId,
-        Artist.Name AS artist_name,
-        SUM(InvoiceLine.UnitPrice * InvoiceLine.Quantity) AS total_revenue
-    FROM Artist
-    INNER JOIN Album
-        ON Artist.ArtistId = Album.ArtistId
-    INNER JOIN Track
-        ON Album.AlbumId = Track.AlbumId
-    INNER JOIN InvoiceLine
-        ON Track.TrackId = InvoiceLine.TrackId
-    GROUP BY Artist.ArtistId, Artist.Name
-),
-ranked_artists AS (
-    SELECT
-        ArtistId,
-        artist_name,
-        total_revenue,
-        RANK() OVER (ORDER BY total_revenue DESC) AS revenue_rank
-    FROM artist_revenue
-)
+    COUNT(*)              AS total_invoices,
+    ROUND(SUM(Total), 2)  AS total_revenue,
+    ROUND(AVG(Total), 2)  AS avg_invoice_value,
+    MIN(InvoiceDate)      AS first_sale,
+    MAX(InvoiceDate)      AS last_sale
+FROM Invoice;
+ 
+ 
+-- Q2. Revenue by year
+-- Question: How do sales change over time?
+-- Techniques: AGGREGATE, GROUP BY, ORDER BY
 SELECT
-    artist_name,
-    total_revenue,
-    revenue_rank
-FROM ranked_artists
-WHERE revenue_rank <= 10
-ORDER BY revenue_rank, artist_name;
-
-
-------------------------------------------------------------
--- 3. TOP 3 PRODUCTS IN EACH CATEGORY USING RANK + PARTITION BY
-------------------------------------------------------------
--- Business question:
--- What are the three highest-revenue tracks in each genre?
---
--- Approach:
--- The first CTE calculates revenue for each track within its genre.
--- The second CTE ranks tracks separately inside each genre; ties share a rank.
-
-WITH track_genre_revenue AS (
-    SELECT
-        Genre.GenreId,
-        Genre.Name AS genre,
-        Track.TrackId,
-        Track.Name AS track_name,
-        SUM(InvoiceLine.UnitPrice * InvoiceLine.Quantity) AS track_revenue
-    FROM Genre
-    INNER JOIN Track
-        ON Genre.GenreId = Track.GenreId
-    INNER JOIN InvoiceLine
-        ON Track.TrackId = InvoiceLine.TrackId
-    GROUP BY Genre.GenreId, Genre.Name, Track.TrackId, Track.Name
-),
-ranked_tracks AS (
-    SELECT
-        genre,
-        track_name,
-        track_revenue,
-        RANK() OVER (
-            PARTITION BY GenreId
-            ORDER BY track_revenue DESC
-        ) AS category_rank
-    FROM track_genre_revenue
-)
+    strftime('%Y', InvoiceDate) AS sales_year,
+    COUNT(*)                    AS invoices,
+    ROUND(SUM(Total), 2)        AS revenue
+FROM Invoice
+GROUP BY sales_year
+ORDER BY sales_year;
+ 
+ 
+-- Q3. Top 10 countries by revenue
+-- Question: Which markets bring in the most money?
+-- Techniques: INNER JOIN, AGGREGATE, GROUP BY, ORDER BY + LIMIT (top N)
 SELECT
-    genre,
-    track_name,
-    track_revenue,
-    category_rank
-FROM ranked_tracks
-WHERE category_rank <= 3
-ORDER BY genre, category_rank, track_name;
-
-
-------------------------------------------------------------
--- 4. ROW_NUMBER() TO DEDUPLICATE CUSTOMER RECORDS
-------------------------------------------------------------
--- Business question:
--- If customer records contain duplicate email addresses, which record should be kept?
---
--- Approach:
--- ROW_NUMBER() numbers records sharing the same normalized email address.
--- Keep row 1 (the lowest CustomerId); blank or missing emails remain separate records.
-
-WITH numbered_customers AS (
-    SELECT
-        CustomerId,
-        FirstName,
-        LastName,
-        Email,
-        Country,
-        ROW_NUMBER() OVER (
-            PARTITION BY
-                CASE
-                    WHEN Email IS NULL OR TRIM(Email) = ''
-                        THEN 'missing-email-' || CustomerId
-                    ELSE LOWER(TRIM(Email))
-                END
-            ORDER BY CustomerId
-        ) AS row_num
-    FROM Customer
-)
+    c.Country,
+    COUNT(DISTINCT c.CustomerId) AS customers,
+    ROUND(SUM(i.Total), 2)       AS revenue
+FROM Customer c
+INNER JOIN Invoice i
+    ON i.CustomerId = c.CustomerId
+GROUP BY c.Country
+ORDER BY revenue DESC
+LIMIT 10;
+ 
+ 
+-- Q4. Top 10 customers by lifetime spend
+-- Question: Who are the highest-value customers?
+-- Techniques: INNER JOIN, AGGREGATE, GROUP BY, ORDER BY + LIMIT (top N)
 SELECT
-    CustomerId,
-    FirstName,
-    LastName,
-    Email,
-    Country
-FROM numbered_customers
-WHERE row_num = 1
-ORDER BY CustomerId;
-
-
-------------------------------------------------------------
--- 5. LAG() TO COMPARE MONTHLY REVENUE WITH THE PREVIOUS MONTH
-------------------------------------------------------------
--- Business question:
--- How did each month's revenue change compared with the previous month?
---
--- Approach:
--- The first CTE aggregates invoice totals by calendar month.
--- LAG() brings the previous month's revenue onto the current month's row.
-
-WITH monthly_revenue AS (
-    SELECT
-        STRFTIME('%Y-%m', InvoiceDate) AS sales_month,
-        SUM(Total) AS monthly_revenue
-    FROM Invoice
-    GROUP BY STRFTIME('%Y-%m', InvoiceDate)
-),
-monthly_comparison AS (
-    SELECT
-        sales_month,
-        monthly_revenue,
-        LAG(monthly_revenue) OVER (ORDER BY sales_month) AS previous_month_revenue
-    FROM monthly_revenue
-)
+    c.CustomerId,
+    c.FirstName || ' ' || c.LastName AS customer,
+    c.Country,
+    ROUND(SUM(i.Total), 2)           AS total_spent
+FROM Customer c
+INNER JOIN Invoice i
+    ON i.CustomerId = c.CustomerId
+GROUP BY c.CustomerId, customer, c.Country
+ORDER BY total_spent DESC
+LIMIT 10;
+ 
+ 
+-- Q5. Repeat buyers
+-- Question: Which customers buy most often, and do frequent buyers spend more?
+-- Techniques: INNER JOIN, GROUP BY + HAVING, AGGREGATE
 SELECT
-    sales_month,
-    monthly_revenue,
-    previous_month_revenue,
-    monthly_revenue - previous_month_revenue AS revenue_change
-FROM monthly_comparison
-ORDER BY sales_month;
-
-
-------------------------------------------------------------
--- 6. CASE WHEN TO CREATE CUSTOMER VALUE SEGMENTS
-------------------------------------------------------------
--- Business question:
--- How can customers be grouped into High, Medium, and Low value segments by lifetime spend?
---
--- Approach:
--- The CTE calculates each customer's total invoice spend, retaining customers with no invoices.
--- CASE assigns segments using illustrative thresholds: High >= 100, Medium >= 40, otherwise Low.
-
+    c.CustomerId,
+    c.FirstName || ' ' || c.LastName AS customer,
+    COUNT(i.InvoiceId)               AS purchases,
+    ROUND(SUM(i.Total), 2)           AS total_spent,
+    ROUND(AVG(i.Total), 2)           AS avg_order_value
+FROM Customer c
+INNER JOIN Invoice i
+    ON i.CustomerId = c.CustomerId
+GROUP BY c.CustomerId, customer
+HAVING COUNT(i.InvoiceId) >= 7
+ORDER BY purchases DESC, total_spent DESC;
+ 
+ 
+-- Q6. Genre performance
+-- Question: Which genres earn the most?
+-- Techniques: INNER JOIN (3 tables), GROUP BY + HAVING, AGGREGATE
+SELECT
+    g.Name                                     AS genre,
+    SUM(il.Quantity)                           AS units_sold,
+    ROUND(SUM(il.UnitPrice * il.Quantity), 2)  AS revenue
+FROM InvoiceLine il
+INNER JOIN Track t ON t.TrackId = il.TrackId
+INNER JOIN Genre g ON g.GenreId = t.GenreId
+GROUP BY g.GenreId, g.Name
+HAVING SUM(il.Quantity) > 50
+ORDER BY revenue DESC;
+ 
+ 
+-- Q7. Top 10 artists by revenue
+-- Question: Which artists contribute the most sales?
+-- Techniques: INNER JOIN (4 tables), AGGREGATE, ORDER BY + LIMIT (top N)
+SELECT
+    ar.Name                                    AS artist,
+    SUM(il.Quantity)                           AS units_sold,
+    ROUND(SUM(il.UnitPrice * il.Quantity), 2)  AS revenue
+FROM InvoiceLine il
+INNER JOIN Track  t  ON t.TrackId  = il.TrackId
+INNER JOIN Album  al ON al.AlbumId = t.AlbumId
+INNER JOIN Artist ar ON ar.ArtistId = al.ArtistId
+GROUP BY ar.ArtistId, ar.Name
+ORDER BY revenue DESC
+LIMIT 10;
+ 
+ 
+-- Q8. Tracks that have never sold
+-- Question: Which catalog items have zero purchases?
+-- Techniques: LEFT JOIN (anti-join with IS NULL), ORDER BY
+SELECT
+    t.TrackId,
+    t.Name AS track,
+    g.Name AS genre
+FROM Track t
+LEFT JOIN InvoiceLine il ON il.TrackId = t.TrackId
+LEFT JOIN Genre g        ON g.GenreId  = t.GenreId
+WHERE il.InvoiceLineId IS NULL
+ORDER BY genre, track;
+ 
+ 
+-- Q9. Sales rep performance
+-- Question: How do support reps compare on customers and revenue?
+-- Techniques: LEFT JOIN (keeps reps with no customers), AGGREGATE, GROUP BY
+SELECT
+    e.EmployeeId,
+    e.FirstName || ' ' || e.LastName AS employee,
+    e.Title,
+    COUNT(DISTINCT c.CustomerId)     AS customers,
+    ROUND(COALESCE(SUM(i.Total), 0), 2) AS revenue_managed
+FROM Employee e
+LEFT JOIN Customer c ON c.SupportRepId = e.EmployeeId
+LEFT JOIN Invoice  i ON i.CustomerId   = c.CustomerId
+GROUP BY e.EmployeeId, employee, e.Title
+ORDER BY revenue_managed DESC;
+ 
+ 
+-- Q10. Where do our customers live?
+-- Question: Which countries and cities do we actually serve?
+-- Techniques: DISTINCT, ORDER BY
+SELECT DISTINCT
+    Country,
+    City
+FROM Customer
+ORDER BY Country, City;
+ 
+ 
+-- Q11. Reporting structure
+-- Question: Who reports to whom in the team?
+-- Techniques: SELF JOIN (join of my choice, INNER)
+SELECT
+    e.FirstName || ' ' || e.LastName AS employee,
+    e.Title                          AS employee_title,
+    m.FirstName || ' ' || m.LastName AS manager,
+    m.Title                          AS manager_title
+FROM Employee e
+INNER JOIN Employee m
+    ON m.EmployeeId = e.ReportsTo
+ORDER BY manager, employee;
+ 
+ 
+-- Q12. Markets with multiple customers, ranked by average spend
+-- Question: Which countries with at least 2 customers spend the most per customer?
+-- Techniques: CTE, INNER JOIN, GROUP BY + HAVING, AGGREGATE (AVG, COUNT)
 WITH customer_spend AS (
     SELECT
-        Customer.CustomerId,
-        Customer.FirstName,
-        Customer.LastName,
-        COALESCE(SUM(Invoice.Total), 0) AS lifetime_spend
-    FROM Customer
-    LEFT JOIN Invoice
-        ON Customer.CustomerId = Invoice.CustomerId
-    GROUP BY Customer.CustomerId, Customer.FirstName, Customer.LastName
+        c.CustomerId,
+        c.Country,
+        SUM(i.Total) AS spend
+    FROM Customer c
+    INNER JOIN Invoice i
+        ON i.CustomerId = c.CustomerId
+    GROUP BY c.CustomerId, c.Country
 )
 SELECT
-    CustomerId,
-    FirstName,
-    LastName,
-    lifetime_spend,
-    CASE
-        WHEN lifetime_spend >= 100 THEN 'High'
-        WHEN lifetime_spend >= 40 THEN 'Medium'
-        ELSE 'Low'
-    END AS customer_segment
+    Country,
+    COUNT(*)              AS customers,
+    ROUND(AVG(spend), 2)  AS avg_spend_per_customer
 FROM customer_spend
-ORDER BY lifetime_spend DESC, CustomerId;
-
-
-------------------------------------------------------------
--- 7. RUNNING TOTAL USING SUM() OVER (ORDER BY ...)
-------------------------------------------------------------
--- Business question:
--- What is the cumulative revenue generated month by month?
---
--- Approach:
--- The CTE first calculates revenue for each month.
--- SUM() OVER orders the months and adds each month's revenue to all preceding months.
-
-WITH monthly_revenue AS (
-    SELECT
-        STRFTIME('%Y-%m', InvoiceDate) AS sales_month,
-        SUM(Total) AS monthly_revenue
-    FROM Invoice
-    GROUP BY STRFTIME('%Y-%m', InvoiceDate)
-)
-SELECT
-    sales_month,
-    monthly_revenue,
-    SUM(monthly_revenue) OVER (
-        ORDER BY sales_month
-        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-    ) AS running_total_revenue
-FROM monthly_revenue
-ORDER BY sales_month;
-
-
-------------------------------------------------------------
--- 8. REWRITE A COMPLEX SUBQUERY AS A CTE
-------------------------------------------------------------
--- Business question:
--- Which customers have lifetime spending above the average lifetime spend per customer?
---
--- Approach:
--- The CTE calculates one lifetime-spend value per customer; the second CTE calculates
--- the average of those customer totals. The final query compares each customer to that average.
---
--- Alternative subquery approach (for comparison):
--- SELECT CustomerId, FirstName, LastName, total_spend
--- FROM (
---     SELECT Customer.CustomerId, Customer.FirstName, Customer.LastName,
---            COALESCE(SUM(Invoice.Total), 0) AS total_spend
---     FROM Customer
---     LEFT JOIN Invoice ON Customer.CustomerId = Invoice.CustomerId
---     GROUP BY Customer.CustomerId, Customer.FirstName, Customer.LastName
--- ) AS customer_totals
--- WHERE total_spend > (
---     SELECT AVG(total_spend)
---     FROM (
---         SELECT Customer.CustomerId,
---                COALESCE(SUM(Invoice.Total), 0) AS total_spend
---         FROM Customer
---         LEFT JOIN Invoice ON Customer.CustomerId = Invoice.CustomerId
---         GROUP BY Customer.CustomerId
---     ) AS average_customer_totals
--- );
---
--- Choice:
--- I would choose the CTE version because each calculation has a clear name and can be
--- inspected or reused. A subquery can be concise for a small one-off calculation, but
--- nested subqueries become harder to read as the logic grows.
-
-WITH customer_spend AS (
-    SELECT
-        Customer.CustomerId,
-        Customer.FirstName,
-        Customer.LastName,
-        COALESCE(SUM(Invoice.Total), 0) AS total_spend
-    FROM Customer
-    LEFT JOIN Invoice
-        ON Customer.CustomerId = Invoice.CustomerId
-    GROUP BY Customer.CustomerId, Customer.FirstName, Customer.LastName
-),
-average_customer_spend AS (
-    SELECT AVG(total_spend) AS average_spend
-    FROM customer_spend
-)
-SELECT
-    customer_spend.CustomerId,
-    customer_spend.FirstName,
-    customer_spend.LastName,
-    customer_spend.total_spend,
-    average_customer_spend.average_spend
-FROM customer_spend
-CROSS JOIN average_customer_spend
-WHERE customer_spend.total_spend > average_customer_spend.average_spend
-ORDER BY customer_spend.total_spend DESC;
-
+GROUP BY Country
+HAVING COUNT(*) >= 2
+ORDER BY avg_spend_per_customer DESC;
+ 

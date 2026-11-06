@@ -30,9 +30,8 @@ FROM Invoice
 GROUP BY sales_year
 ORDER BY sales_year;
  
-------------------------------------------------------------
 -- Q3. TOP 3 PRODUCTS IN EACH CATEGORY USING ROW_NUMBER + PARTITION BY
-------------------------------------------------------------
+
 -- Business question:
 -- What are the three highest-revenue tracks in each genre?
 --
@@ -111,8 +110,7 @@ ORDER BY purchases DESC, total_spent DESC;
  
  
 
--- 6. CASE WHEN TO CREATE CUSTOMER VALUE SEGMENTS
-
+-- Q6. CASE WHEN TO CREATE CUSTOMER VALUE SEGMENTS
 -- Business question:
 -- How can customers be grouped into High, Medium, and Low value segments by lifetime spend?
 --
